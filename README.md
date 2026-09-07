@@ -2,6 +2,10 @@
 
 A work-in-progress desktop focus timer built with an Arduino, a 16x2 LCD, push buttons, a buzzer, and an RGB LED.
 
+![Breadboard prototype with Mega 2560 board, LCD, buttons, buzzer, and RGB LED](prototype.jpg)
+
+The photo shows the breadboard prototype. Its LCD displays a session counter that is not present in the uploaded sketch, so the photographed firmware appears to be a different revision.
+
 ## Project status
 
 - Timer operation verified on a breadboard prototype by the project author.
@@ -57,7 +61,7 @@ Buttons use `INPUT_PULLUP` and are active-low. This table documents the software
 The author reports successful breadboard operation. No new compile or physical hardware test was performed while preparing this repository.
 
 - Complete protoshield soldering and retest all controls.
-- Add prototype photos and the custom footprint library.
+- Add the custom footprint library.
 - Document component values and the exact board model.
 - Test every preset, pause/resume in both phases, reset, and full focus-to-break transitions.
 - Review a reset edge case: the sketch does not restore `wasFocusBeforePause` when resetting during a break. Resetting in a break, starting a new focus session, and then pausing/resuming may incorrectly resume in break mode. The original code is retained unchanged for now.
