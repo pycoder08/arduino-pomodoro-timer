@@ -1,4 +1,32 @@
+/*
+  Desktop Focus Timer
+  Arduino Mega 2560
+
+  Hardware:
+    LCD1602 (4-bit mode)      -> pins 12(RS),11(E),5(D4),4(D5),3(D6),2(D7)
+    Start/Pause button        -> pin 6  (INPUT_PULLUP)
+    Reset button               -> pin 7  (INPUT_PULLUP)
+    Mode button                -> pin 8  (INPUT_PULLUP)
+    Passive buzzer              -> pin 9
+    RGB LED (common cathode)   -> R=44, G=45, B=46
+    LCD contrast (V0)          -> fixed resistor divider (~8.5k to 5V, ~1k to GND) - no pin used
+
+  Behavior:
+    IDLE          -> LCD shows focus/break lengths + sessions completed today,
+                     cycle options with Mode, press Start to begin
+    RUNNING_FOCUS -> red LED (slow breathing effect), countdown, auto-advances to break when done
+    RUNNING_BREAK -> green LED (solid), countdown, auto-returns to IDLE when done
+    PAUSED        -> Start/Pause resumes with remaining time saved
+    Reset (short press) -> skips to the next phase immediately
+    Reset (held 1s+)    -> full reset back to IDLE, cancels current session
+
+  Last-used session option is saved to EEPROM and restored on power-up.
+  Session counter resets on power-up (not saved, since it's meant to track "today").
+*/
+
 #include <LiquidCrystal.h>
+#include <EEPROM.h>
+
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 
 const int startPin = 6;
@@ -6,25 +34,120 @@ const int resetPin = 7;
 const int modePin = 8;
 const int buzzerPin = 9;
 const int redPin = 44;
-const int bluePin = 45;  // swapped per earlier fix
-const int greenPin = 46; // swapped per earlier fix
+const int greenPin = 46; // physical wiring swap accounted for
+const int bluePin = 45;  // physical wiring swap accounted for
+
+const unsigned long DEBOUNCE_MS = 50;
+const unsigned long REPEAT_LOCKOUT_MS = 200;
+const unsigned long LONG_PRESS_MS = 1000; // hold Reset this long for a full reset
+const int EEPROM_OPTION_ADDR = 0;
 
 enum State { IDLE, RUNNING_FOCUS, RUNNING_BREAK, PAUSED };
 State currentState = IDLE;
 
-// session lengths in minutes, cycled by Mode button while IDLE
 const int focusOptions[] = {25, 15, 50};
 const int breakOptions[] = {5, 5, 10};
+const int NUM_OPTIONS = 3;
 int optionIndex = 0;
+int sessionsCompleted = 0;
 
 unsigned long sessionLengthMs;
 unsigned long startTime;
-unsigned long remainingMs; // used when pausing/resuming
-
-bool lastStartState = HIGH;
-bool lastResetState = HIGH;
-bool lastModeState = HIGH;
+unsigned long remainingMs;
 bool wasFocusBeforePause = true;
+
+// ---- non-blocking debounce state ----
+struct Button {
+  int pin;
+  bool lastReading;
+  bool stableState;
+  unsigned long lastChangeTime;
+  unsigned long lastAcceptedTime;
+  bool longPressFired;
+};
+
+Button startBtn = {startPin, HIGH, HIGH, 0, 0, false};
+Button resetBtn = {resetPin, HIGH, HIGH, 0, 0, false};
+Button modeBtn  = {modePin,  HIGH, HIGH, 0, 0, false};
+
+// returns true exactly once, the moment a debounced press (HIGH->LOW) is accepted
+bool checkPressed(Button &b) {
+  bool reading = digitalRead(b.pin);
+  unsigned long now = millis();
+
+  if (reading != b.lastReading) {
+    b.lastChangeTime = now;
+    b.lastReading = reading;
+  }
+
+  if ((now - b.lastChangeTime) > DEBOUNCE_MS && b.stableState != reading) {
+    b.stableState = reading;
+    if (b.stableState == LOW && (now - b.lastAcceptedTime) > REPEAT_LOCKOUT_MS) {
+      b.lastAcceptedTime = now;
+      b.longPressFired = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+// returns true exactly once, when a currently-held button crosses the long-press threshold
+bool checkLongPress(Button &b) {
+  if (b.stableState == LOW && !b.longPressFired) {
+    if (millis() - b.lastChangeTime > LONG_PRESS_MS) {
+      b.longPressFired = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---- non-blocking buzzer melody player ----
+int melodyNotes[8];
+int melodyDurations[8];
+int melodyLength = 0;
+int melodyIndex = 0;
+unsigned long melodyNoteStart = 0;
+bool melodyPlaying = false;
+
+void playMelody(int *notes, int *durations, int length) {
+  for (int i = 0; i < length; i++) {
+    melodyNotes[i] = notes[i];
+    melodyDurations[i] = durations[i];
+  }
+  melodyLength = length;
+  melodyIndex = 0;
+  melodyPlaying = true;
+  melodyNoteStart = millis();
+  tone(buzzerPin, melodyNotes[0], melodyDurations[0]);
+}
+
+void updateMelody() {
+  if (!melodyPlaying) return;
+  if (millis() - melodyNoteStart >= (unsigned long)melodyDurations[melodyIndex] + 30) {
+    melodyIndex++;
+    if (melodyIndex >= melodyLength) {
+      melodyPlaying = false;
+      return;
+    }
+    melodyNoteStart = millis();
+    tone(buzzerPin, melodyNotes[melodyIndex], melodyDurations[melodyIndex]);
+  }
+}
+
+// ---- non-blocking breathing LED (red channel pulse during focus) ----
+unsigned long breatheStart = 0;
+const unsigned long BREATHE_PERIOD_MS = 3000;
+
+void updateBreathingRed() {
+  unsigned long t = (millis() - breatheStart) % BREATHE_PERIOD_MS;
+  float phase = (float)t / BREATHE_PERIOD_MS; // 0..1
+  float level = (1.0 - cos(phase * 2.0 * PI)) / 2.0; // 0..1 smooth pulse
+  int brightness = 60 + (int)(level * 195); // floor at 60 so it never fully goes dark
+  analogWrite(redPin, brightness);
+  analogWrite(greenPin, 0);
+  analogWrite(bluePin, 0);
+}
 
 void setup() {
   Serial.begin(9600);
@@ -36,92 +159,130 @@ void setup() {
   pinMode(greenPin, OUTPUT);
   pinMode(bluePin, OUTPUT);
 
+  int savedOption = EEPROM.read(EEPROM_OPTION_ADDR);
+  if (savedOption >= 0 && savedOption < NUM_OPTIONS) {
+    optionIndex = savedOption;
+  }
+
   lcd.begin(16, 2);
+  lcd.print("Focus Timer");
+  delay(1000);
   showIdleScreen();
 }
 
 void loop() {
-  bool startState = digitalRead(startPin);
-  bool resetState = digitalRead(resetPin);
-  bool modeState = digitalRead(modePin);
+  bool startPressed = checkPressed(startBtn);
+  bool resetPressed = checkPressed(resetBtn);
+  bool modePressed  = checkPressed(modeBtn);
+  bool resetLongPress = checkLongPress(resetBtn);
 
-  // Reset button - returns to IDLE from anywhere
-  if (resetState == LOW && lastResetState == HIGH) {
+  updateMelody();
+
+  if (resetLongPress) {
+    // full reset, cancels whatever was happening
     currentState = IDLE;
     setColor(0, 0, 0);
+    tone(buzzerPin, 300, 200);
     showIdleScreen();
-    delay(200); // debounce
+  } else if (resetPressed && currentState != IDLE) {
+    // short press while running/paused: skip to next phase
+    skipToNextPhase();
+  } else if (resetPressed && currentState == IDLE) {
+    // short press while idle: just a gentle no-op beep, nothing to skip
+    tone(buzzerPin, 400, 80);
   }
 
-  // Mode button - only cycles options while IDLE
-  if (modeState == LOW && lastModeState == HIGH && currentState == IDLE) {
-    optionIndex = (optionIndex + 1) % 3;
+  if (modePressed && currentState == IDLE) {
+    optionIndex = (optionIndex + 1) % NUM_OPTIONS;
+    EEPROM.update(EEPROM_OPTION_ADDR, optionIndex);
     showIdleScreen();
-    delay(200);
   }
 
-  // Start/Pause button
-  if (startState == LOW && lastStartState == HIGH) {
+  if (startPressed) {
     handleStartPause();
-    delay(200);
   }
 
-  // Update countdown if running
   if (currentState == RUNNING_FOCUS || currentState == RUNNING_BREAK) {
     updateCountdown();
+    if (currentState == RUNNING_FOCUS) {
+      updateBreathingRed();
+    }
   }
-
-  lastStartState = startState;
-  lastResetState = resetState;
-  lastModeState = modeState;
 }
 
 void handleStartPause() {
   if (currentState == IDLE) {
-    sessionLengthMs = (unsigned long)focusOptions[optionIndex] * 60000UL;
-    startTime = millis();
-    currentState = RUNNING_FOCUS;
-    setColor(255, 0, 0); // red = focus
-    tone(buzzerPin, 1000, 150);
+    beginFocusSession();
   } else if (currentState == RUNNING_FOCUS || currentState == RUNNING_BREAK) {
-    // pause: save how much time was left
     unsigned long elapsed = millis() - startTime;
     remainingMs = (elapsed < sessionLengthMs) ? (sessionLengthMs - elapsed) : 0;
+    wasFocusBeforePause = (currentState == RUNNING_FOCUS);
     currentState = PAUSED;
     setColor(0, 0, 0);
     tone(buzzerPin, 600, 150);
+    lcd.setCursor(0, 0);
+    lcd.print("PAUSED          ");
   } else if (currentState == PAUSED) {
-    // resume with remaining time
     sessionLengthMs = remainingMs;
     startTime = millis();
-    // restore correct color depending on what was paused
     currentState = wasFocusBeforePause ? RUNNING_FOCUS : RUNNING_BREAK;
-    setColor(wasFocusBeforePause ? 255 : 0, wasFocusBeforePause ? 0 : 255, 0);
+    if (wasFocusBeforePause) {
+      breatheStart = millis();
+    } else {
+      setColor(0, 255, 0);
+    }
     tone(buzzerPin, 1000, 150);
   }
 }
 
+void beginFocusSession() {
+  sessionLengthMs = (unsigned long)focusOptions[optionIndex] * 60000UL;
+  startTime = millis();
+  currentState = RUNNING_FOCUS;
+  breatheStart = millis();
+  tone(buzzerPin, 1000, 150);
+}
+
+void beginBreakSession() {
+  sessionLengthMs = (unsigned long)breakOptions[optionIndex] * 60000UL;
+  startTime = millis();
+  currentState = RUNNING_BREAK;
+  setColor(0, 255, 0);
+}
+
+// short-press Reset while running: jump straight to the next phase
+void skipToNextPhase() {
+  bool inFocus = (currentState == RUNNING_FOCUS) ||
+                 (currentState == PAUSED && wasFocusBeforePause);
+  if (inFocus) {
+    sessionsCompleted++;
+    beginBreakSession();
+    tone(buzzerPin, 800, 100);
+  } else {
+    currentState = IDLE;
+    setColor(0, 0, 0);
+    tone(buzzerPin, 500, 150);
+    showIdleScreen();
+  }
+}
 
 void updateCountdown() {
   unsigned long elapsed = millis() - startTime;
   long remaining = sessionLengthMs - elapsed;
 
   if (remaining <= 0) {
-    // session complete - transition
     if (currentState == RUNNING_FOCUS) {
-      wasFocusBeforePause = false;
-      sessionLengthMs = (unsigned long)breakOptions[optionIndex] * 60000UL;
-      startTime = millis();
-      currentState = RUNNING_BREAK;
-      setColor(0, 255, 0); // green = break
-      tone(buzzerPin, 800, 100);
-      delay(120);
-      tone(buzzerPin, 800, 100);
+      sessionsCompleted++;
+      beginBreakSession();
+      int notes[] = {880, 988, 1175};
+      int durs[]  = {100, 100, 150};
+      playMelody(notes, durs, 3);
     } else {
-      wasFocusBeforePause = true;
       currentState = IDLE;
       setColor(0, 0, 0);
-      tone(buzzerPin, 1200, 300);
+      int notes[] = {1175, 988, 784, 1047};
+      int durs[]  = {100, 100, 100, 250};
+      playMelody(notes, durs, 4);
       showIdleScreen();
     }
     return;
@@ -132,11 +293,13 @@ void updateCountdown() {
   int secs = totalSeconds % 60;
 
   lcd.setCursor(0, 0);
-  lcd.print(currentState == RUNNING_FOCUS ? "FOCUS   " : "BREAK   ");
+  lcd.print(currentState == RUNNING_FOCUS ? "FOCUS           " : "BREAK           ");
   lcd.setCursor(0, 1);
-  lcd.print(mins < 10 ? "0" : ""); lcd.print(mins);
+  if (mins < 10) lcd.print("0");
+  lcd.print(mins);
   lcd.print(":");
-  lcd.print(secs < 10 ? "0" : ""); lcd.print(secs);
+  if (secs < 10) lcd.print("0");
+  lcd.print(secs);
   lcd.print("        ");
 }
 
@@ -148,7 +311,8 @@ void showIdleScreen() {
   lcd.print("m Brk:");
   lcd.print(breakOptions[optionIndex]);
   lcd.setCursor(0, 1);
-  lcd.print("Press Start");
+  lcd.print("Sessions: ");
+  lcd.print(sessionsCompleted);
 }
 
 void setColor(int r, int g, int b) {
