@@ -1,44 +1,46 @@
 # Arduino Pomodoro Timer
 
-A work-in-progress desktop focus timer built with an Arduino, a 16x2 LCD, push buttons, a buzzer, and an RGB LED.
+A desktop focus timer I built around an Arduino Mega, a 16x2 LCD, three push buttons, a buzzer, and an RGB LED. It runs configurable focus/break cycles and signals each transition with color and sound.
 
-![Breadboard prototype with Mega 2560 board, LCD, buttons, buzzer, and RGB LED](prototype.jpg)
+![Breadboard prototype with Mega 2560, LCD, buttons, buzzer, and RGB LED](prototype.jpg)
 
-The photo shows the breadboard prototype. Its LCD displays a session counter that is not present in the uploaded sketch, so the photographed firmware appears to be a different revision.
+## Status
 
-## Project status
+The breadboard prototype works — I've run the timer through its focus and break cycles on it. The schematic and PCB layout are drawn in KiCad and included here. I'm currently soldering the circuit onto an Arduino protoshield.
 
-- Timer operation verified on a breadboard prototype by the project author.
-- Circuit schematic, PCB layout, and KiCad project files are included in this repository.
-- Soldering components onto an Arduino protoshield is in progress.
-- A fabricated custom PCB and completed protoshield have not yet been validated.
+I have not fabricated the custom PCB yet, so the layout is a work in progress rather than something I'd send to a fab house today. Routing and design-rule checks still need a pass.
 
-## My contributions
+## Features
 
-I assembled and tested the breadboard prototype, created the schematic and PCB layout in KiCad, and am working on protoshield assembly. The Arduino code was generated with AI assistance. This repository preserves the original sketch as a project snapshot.
+- Three focus/break presets: 25/5, 15/5, and 50/10 minutes
+- Start, pause, and resume, with the remaining time preserved across a pause
+- Tap Reset to skip to the next phase; hold it for a second to cancel the session outright
+- Preset selection with the mode button while idle, remembered in EEPROM across power cycles
+- Count of sessions finished since power-on, shown on the idle screen
+- Countdown on a 16x2 LCD
+- Red RGB LED breathing during focus, solid green during breaks
+- Multi-note buzzer melodies at session transitions
 
-## Features in the sketch
-
-- Focus/break presets: 25/5, 15/5, and 50/10 minutes.
-- Start, pause, resume, and reset controls.
-- Mode selection while idle.
-- Countdown on a 16x2 LCD.
-- Red LED indication during focus and green during breaks.
-- Audible feedback for timer events.
+Button handling, the melodies, and the LED breathing are all non-blocking, so the countdown
+stays accurate and the buttons stay responsive no matter what else is happening.
 
 ## Hardware
 
-Arduino board, 16x2 LCD, three push buttons, buzzer, RGB LED, potentiometer, resistors, breadboard, and wiring. Protoshield assembly is underway.
+Arduino Mega 2560, 16x2 LCD, three push buttons, a passive buzzer, a common-cathode RGB LED,
+resistors, breadboard, and jumper wire. LCD contrast comes from a fixed divider (roughly 8.5k to
+5V and 1k to ground) rather than a trim potentiometer, so no pin is spent on it.
 
-The sketch uses digital pins 44, 45, and 46, which are available on a Mega 2560-class board. Confirm the actual board before uploading; the current pin assignment does not fit an Uno without changes. Exact component models and resistor values are not yet documented.
+The sketch drives the RGB LED on pins 44–46. Those are PWM-capable on the Mega, which the
+breathing effect needs, and they don't exist on a Uno — remap them if you build this on a smaller
+board. I still need to document exact component models and resistor values.
 
-### Pin assignments from the sketch
+### Pin assignments
 
 | Function | Arduino pin |
 | --- | --- |
 | LCD RS | 12 |
 | LCD enable | 11 |
-| LCD D4, D5, D6, D7 | 5, 4, 3, 2 |
+| LCD D4–D7 | 5, 4, 3, 2 |
 | Start / pause | 6 |
 | Reset | 7 |
 | Mode | 8 |
@@ -47,27 +49,33 @@ The sketch uses digital pins 44, 45, and 46, which are available on a Mega 2560-
 | RGB blue | 45 |
 | RGB green | 46 |
 
-Buttons use `INPUT_PULLUP` and are active-low. This table documents the software pin assignment, not a complete wiring guide. Check LCD power/contrast wiring, RGB LED type, and current-limiting resistors against the hardware design.
+Buttons are wired active-low using `INPUT_PULLUP` and are debounced in software. This table covers
+the software pin assignment only — check LCD contrast wiring, your RGB LED's common pin, and
+current-limiting resistors against your own build.
 
-## Open the sketch
+## Running it
 
-1. Open `timer.ino` in the Arduino IDE. If prompted, allow the IDE to place it in a folder named `timer`.
-2. Make the `LiquidCrystal` library available in the IDE.
-3. Select the connected board and port, checking that its pins match the table above.
-4. Verify/compile, then upload to the board.
-
-## Validation and remaining work
-
-The author reports successful breadboard operation. No new compile or physical hardware test was performed while preparing this repository.
-
-- Complete protoshield soldering and retest all controls.
-- Add the custom footprint library.
-- Document component values and the exact board model.
-- Test every preset, pause/resume in both phases, reset, and full focus-to-break transitions.
-- Review a reset edge case: the sketch does not restore `wasFocusBeforePause` when resetting during a break. Resetting in a break, starting a new focus session, and then pausing/resuming may incorrectly resume in break mode. The original code is retained unchanged for now.
+1. Open `timer.ino` in the Arduino IDE, letting it create the enclosing `timer` folder if prompted.
+2. Make sure the `LiquidCrystal` library is installed. `EEPROM` ships with the IDE.
+3. Select your board and port, confirming the pins above exist on it.
+4. Compile and upload.
 
 ## KiCad files
 
-Open `Timer.kicad_pro` for the main project, with `Timer.kicad_sch` and `Timer.kicad_pcb`. The additional `focus_timer_schematic.kicad_sch` file is preserved from the source folder; it appears to contain the Arduino header connections rather than the full timer circuit.
+`Timer.kicad_pro` is the main project, with `Timer.kicad_sch` for the schematic and `Timer.kicad_pcb` for the layout. `Arduino_MountingHole.pretty` holds the custom mounting-hole footprints the board references.
 
-The footprint table references `Arduino_MountingHole.pretty`, which was not present in the supplied folder. The PCB contains placed footprint geometry, but updating the custom mounting-hole footprint from its library requires that missing library. PCB routing and electrical/design-rule checks have not been verified for this upload; treat the layout as work in progress, not fabrication-ready.
+`focus_timer_schematic.kicad_sch` is an earlier sheet covering just the Arduino header connections, kept for reference.
+
+## A note on the code
+
+I wrote this project's firmware with AI assistance. The circuit design, breadboard build and testing, schematic capture, PCB layout, and protoshield assembly are my own work.
+
+## To do
+
+- Finish the protoshield soldering and retest every control
+- Document component models and resistor values
+- Run design-rule checks on the PCB before fabricating
+- Test all three presets, pause/resume in both phases, tap and hold Reset, and the full
+  focus-to-break transition
+- Persist the session count across power cycles, or roll it over on a real clock rather than at
+  power-on
