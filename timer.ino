@@ -8,7 +8,7 @@
     Reset button               -> pin 7  (INPUT_PULLUP)
     Mode button                -> pin 8  (INPUT_PULLUP)
     Passive buzzer              -> pin 9
-    RGB LED (common cathode)   -> R=44, G=45, B=46
+    RGB LED (common cathode)   -> R=44, G=46, B=45
     LCD contrast (V0)          -> fixed resistor divider (~8.5k to 5V, ~1k to GND) - no pin used
 
   Behavior:
@@ -17,7 +17,7 @@
     RUNNING_FOCUS -> red LED (slow breathing effect), countdown, auto-advances to break when done
     RUNNING_BREAK -> green LED (solid), countdown, auto-returns to IDLE when done
     PAUSED        -> Start/Pause resumes with remaining time saved
-    Reset (short press) -> skips to the next phase immediately
+    Reset (tap, on release) -> skips to the next phase
     Reset (held 1s+)    -> full reset back to IDLE, cancels current session
 
   Last-used session option is saved to EEPROM and restored on power-up.
@@ -64,11 +64,12 @@ struct Button {
   unsigned long lastChangeTime;
   unsigned long lastAcceptedTime;
   bool longPressFired;
+  bool pressPending;   // a press is down and has not yet resolved to short or long
 };
 
-Button startBtn = {startPin, HIGH, HIGH, 0, 0, false};
-Button resetBtn = {resetPin, HIGH, HIGH, 0, 0, false};
-Button modeBtn  = {modePin,  HIGH, HIGH, 0, 0, false};
+Button startBtn = {startPin, HIGH, HIGH, 0, 0, false, false};
+Button resetBtn = {resetPin, HIGH, HIGH, 0, 0, false, false};
+Button modeBtn  = {modePin,  HIGH, HIGH, 0, 0, false, false};
 
 // returns true exactly once, the moment a debounced press (HIGH->LOW) is accepted
 bool checkPressed(Button &b) {
@@ -85,6 +86,7 @@ bool checkPressed(Button &b) {
     if (b.stableState == LOW && (now - b.lastAcceptedTime) > REPEAT_LOCKOUT_MS) {
       b.lastAcceptedTime = now;
       b.longPressFired = false;
+      b.pressPending = true;
       return true;
     }
   }
@@ -96,8 +98,18 @@ bool checkLongPress(Button &b) {
   if (b.stableState == LOW && !b.longPressFired) {
     if (millis() - b.lastChangeTime > LONG_PRESS_MS) {
       b.longPressFired = true;
+      b.pressPending = false; // this press is a hold, so cancel the pending tap
       return true;
     }
+  }
+  return false;
+}
+
+// returns true once on release, but only if the press never became a long press
+bool checkTap(Button &b) {
+  if (b.stableState == HIGH && b.pressPending) {
+    b.pressPending = false;
+    return true;
   }
   return false;
 }
@@ -172,9 +184,10 @@ void setup() {
 
 void loop() {
   bool startPressed = checkPressed(startBtn);
-  bool resetPressed = checkPressed(resetBtn);
+  checkPressed(resetBtn); // keeps reset's debounce state current; it acts on release
   bool modePressed  = checkPressed(modeBtn);
   bool resetLongPress = checkLongPress(resetBtn);
+  bool resetTapped = checkTap(resetBtn);
 
   updateMelody();
 
@@ -184,11 +197,11 @@ void loop() {
     setColor(0, 0, 0);
     tone(buzzerPin, 300, 200);
     showIdleScreen();
-  } else if (resetPressed && currentState != IDLE) {
-    // short press while running/paused: skip to next phase
+  } else if (resetTapped && currentState != IDLE) {
+    // tap while running/paused: skip to next phase
     skipToNextPhase();
-  } else if (resetPressed && currentState == IDLE) {
-    // short press while idle: just a gentle no-op beep, nothing to skip
+  } else if (resetTapped && currentState == IDLE) {
+    // tap while idle: just a gentle no-op beep, nothing to skip
     tone(buzzerPin, 400, 80);
   }
 
